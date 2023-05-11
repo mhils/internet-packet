@@ -78,7 +78,7 @@ const IPV6_EXTENSION_HEADERS: [u8; 11] = [
     135, 139, 140, 253, 254,
 ];
 
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Debug)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Hash)]
 pub struct ConnectionId {
     pub proto: TransportProtocol,
     pub src: SocketAddr,
@@ -93,6 +93,13 @@ impl ConnectionId {
             src: self.dst,
         }
     }
+    pub fn canonical_form(self) -> Self {
+        if self.src < self.dst {
+            self.reverse()
+        } else {
+            self
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,11 +109,13 @@ pub struct InternetPacket {
     transport_proto: TransportProtocol,
     transport_proto_offset: usize,
     payload_offset: usize,
+    payload_end: usize
 }
 
-/// A simple representation of TCP/UDP over IPv4/IPv6 packets.
-impl InternetPacket {
-    pub fn new(data: Vec<u8>) -> Result<InternetPacket, ParseError> {
+impl TryFrom<Vec<u8>> for InternetPacket {
+    type Error = ParseError;
+
+    fn try_from(data: Vec<u8>) -> Result<Self, Self::Error> {
         if data.is_empty() {
             return Err(ParseError::Malformed);
         }
@@ -117,14 +126,15 @@ impl InternetPacket {
             _ => return Err(ParseError::Malformed),
         };
 
-        let (transport_proto, transport_proto_offset) = match ip_version {
+        let (transport_proto, transport_proto_offset, payload_end) = match ip_version {
             IpVersion::V4 => {
                 if data.len() < 20 {
                     return Err(ParseError::Malformed);
                 }
                 let proto = data[9];
                 let offset = (data[0] & 0x0F) as usize * 4;
-                (proto, offset)
+                let total_length = ((data[2] as usize) << 8) + data[3] as usize;
+                (proto, offset, total_length)
             }
             IpVersion::V6 => {
                 if data.len() < 40 {
@@ -141,7 +151,9 @@ impl InternetPacket {
                     offset += data[offset + 1] as usize * 8 - 8;
                 }
 
-                (next_header, offset)
+                let payload_length = ((data[4] as usize) << 8) + data[5] as usize;
+
+                (next_header, offset, payload_length + 40)
             }
         };
 
@@ -171,9 +183,13 @@ impl InternetPacket {
             transport_proto,
             transport_proto_offset,
             payload_offset,
+            payload_end,
         })
     }
+}
 
+/// A simple representation of TCP/UDP over IPv4/IPv6 packets.
+impl InternetPacket {
     pub fn src_ip(&self) -> IpAddr {
         match self.ip_version {
             IpVersion::V4 => {
@@ -296,33 +312,56 @@ impl InternetPacket {
         }
     }
 
-    pub fn tcp_flag_str(&self) -> String {
+    pub fn tcp_sequence_number(&self) -> u32 {
         match self.transport_proto {
             TransportProtocol::Tcp => {
-                let mut flags: Vec<&str> = vec![];
-                let flag_bits = self.data[self.transport_proto_offset + 13];
-                if flag_bits & 0x01 != 0 {
-                    flags.push("FIN");
-                }
-                if flag_bits & 0x02 != 0 {
-                    flags.push("SYN");
-                }
-                if flag_bits & 0x04 != 0 {
-                    flags.push("RST");
-                }
-                if flag_bits & 0x08 != 0 {
-                    flags.push("PSH");
-                }
-                if flag_bits & 0x10 != 0 {
-                    flags.push("ACK");
-                }
-                if flag_bits & 0x20 != 0 {
-                    flags.push("URG");
-                }
-                flags.join("/")
+                u32::from_be_bytes(
+                    self.data[self.transport_proto_offset + 4..self.transport_proto_offset + 8]
+                        .try_into()
+                        .unwrap(),
+                )
             }
-            _ => String::new(),
+            _ => 0,
         }
+    }
+
+    fn tcp_flags(&self) -> u8 {
+        match self.transport_proto {
+            TransportProtocol::Tcp => self.data[self.transport_proto_offset + 13],
+            _ => 0,
+        }
+    }
+
+    pub fn tcp_syn(&self) -> bool {
+        self.tcp_flags() & 0x02 != 0
+    }
+
+    pub fn tcp_ack(&self) -> bool {
+        self.tcp_flags() & 0x10 != 0
+    }
+
+    pub fn tcp_flag_str(&self) -> String {
+        let mut flags: Vec<&str> = vec![];
+        let flag_bits = self.tcp_flags();
+        if flag_bits & 0x01 != 0 {
+            flags.push("FIN");
+        }
+        if flag_bits & 0x02 != 0 {
+            flags.push("SYN");
+        }
+        if flag_bits & 0x04 != 0 {
+            flags.push("RST");
+        }
+        if flag_bits & 0x08 != 0 {
+            flags.push("PSH");
+        }
+        if flag_bits & 0x10 != 0 {
+            flags.push("ACK");
+        }
+        if flag_bits & 0x20 != 0 {
+            flags.push("URG");
+        }
+        flags.join("/")
     }
 
     pub fn protocol(&self) -> TransportProtocol {
@@ -330,7 +369,7 @@ impl InternetPacket {
     }
 
     pub fn payload(&self) -> &[u8] {
-        &self.data[self.payload_offset..]
+        &self.data[self.payload_offset..self.payload_end]
     }
 
     #[cfg(feature = "checksums")]
@@ -414,9 +453,11 @@ mod tests {
     11040000000009070000010bbc09dd98f9b0b12e647f4454\
     095c00350024f0090006010000010000000000000669746f6a756e036f72670000ff0001".as_bytes();
 
+    const TCP_ACK_WITH_PADDING: &[u8] = "4500002869330000320676a85db8d822c0a8b2710050d5224e95b5f3e586c974501000807d6800000000".as_bytes();
+
     #[test]
     fn parse_udp_ipv6_packet() {
-        let mut packet = InternetPacket::new(HEXLOWER.decode(DNS_REQ).unwrap()).unwrap();
+        let mut packet = InternetPacket::try_from(HEXLOWER.decode(DNS_REQ).unwrap()).unwrap();
         assert_eq!(packet.ip_version, IpVersion::V6);
         assert_eq!(
             packet.connection_id(),
@@ -450,16 +491,16 @@ mod tests {
         let data = HEXLOWER.decode(DNS_REQ).unwrap();
         for i in 0..72 {
             assert!(matches!(
-                InternetPacket::new(data[..i].to_vec()),
+                InternetPacket::try_from(data[..i].to_vec()),
                 Err(ParseError::Malformed)
             ));
         }
-        assert!(matches!(InternetPacket::new(data[..72].to_vec()), Ok(_)));
+        assert!(matches!(InternetPacket::try_from(data[..72].to_vec()), Ok(_)));
     }
 
     #[test]
     fn parse_tcp_ipv4_packet() {
-        let mut packet = InternetPacket::new(HEXLOWER.decode(TCP_SYN).unwrap()).unwrap();
+        let mut packet = InternetPacket::try_from(HEXLOWER.decode(TCP_SYN).unwrap()).unwrap();
         assert_eq!(packet.ip_version, IpVersion::V4);
         assert_eq!(
             packet.connection_id(),
@@ -496,10 +537,19 @@ mod tests {
         let data = HEXLOWER.decode(TCP_SYN).unwrap();
         for i in 0..data.len() {
             assert!(matches!(
-                InternetPacket::new(data[..i].to_vec()),
+                InternetPacket::try_from(data[..i].to_vec()),
                 Err(ParseError::Malformed)
             ));
         }
+    }
+
+    #[test]
+    fn parse_tcp_ipv4_packet_with_padding() {
+        let packet = InternetPacket::try_from(HEXLOWER.decode(TCP_ACK_WITH_PADDING).unwrap()).unwrap();
+        assert_eq!(packet.ip_version, IpVersion::V4);
+        assert!(!packet.tcp_syn());
+        assert!(packet.tcp_ack());
+        assert_eq!(packet.payload().len(), 0);
     }
 
     #[cfg(feature = "checksums")]
@@ -508,7 +558,7 @@ mod tests {
         let raw = HEXLOWER.decode(TCP_SYN).unwrap();
         let mut raw2 = raw.clone();
         raw2[10..12].copy_from_slice(&[0xab, 0xcd]);
-        let mut packet = InternetPacket::new(raw2).unwrap();
+        let mut packet = InternetPacket::try_from(raw2).unwrap();
 
         packet.recalculate_ip_checksum();
         assert_eq!(packet.data, raw);
@@ -520,7 +570,7 @@ mod tests {
         let raw = HEXLOWER.decode(TCP_SYN).unwrap();
         let mut raw2 = raw.clone();
         raw2[36..38].copy_from_slice(&[0xab, 0xcd]);
-        let mut packet = InternetPacket::new(raw2).unwrap();
+        let mut packet = InternetPacket::try_from(raw2).unwrap();
         packet.recalculate_tcp_checksum();
         assert_eq!(packet.data, raw);
     }
@@ -531,8 +581,20 @@ mod tests {
         let raw = HEXLOWER.decode(DNS_REQ).unwrap();
         let mut raw2 = raw.clone();
         raw2[70..72].copy_from_slice(&[0xab, 0xcd]);
-        let mut packet = InternetPacket::new(raw2).unwrap();
+        let mut packet = InternetPacket::try_from(raw2).unwrap();
         packet.recalculate_udp_checksum();
         assert_eq!(packet.data, raw);
+    }
+
+    #[test]
+    fn canonicalize_connection_id() {
+        let a = ConnectionId {
+            proto: TransportProtocol::Tcp,
+            src: SocketAddr::from_str("[::1]:2").unwrap(),
+            dst: SocketAddr::from_str("[::3]:4").unwrap(),
+        };
+        let b = a.reverse();
+        assert_ne!(a, b);
+        assert_eq!(a.canonical_form(), b.canonical_form());
     }
 }
