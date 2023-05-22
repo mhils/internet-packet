@@ -148,7 +148,7 @@ impl TryFrom<Vec<u8>> for InternetPacket {
                         return Err(ParseError::Malformed);
                     }
                     next_header = data[offset];
-                    offset += data[offset + 1] as usize * 8 - 8;
+                    offset += (1 + data[offset + 1]) as usize * 8 - 8;
                 }
 
                 let payload_length = ((data[4] as usize) << 8) + data[5] as usize;
