@@ -9,10 +9,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo test --all-features
+    uses: mhils/workflows/.github/workflows/rust-test.yml@main
 
   deploy:
     uses: mhils/workflows/.github/workflows/rust-deploy.yml@main
