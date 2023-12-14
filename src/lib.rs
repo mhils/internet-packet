@@ -49,10 +49,11 @@ impl TryFrom<u8> for TransportProtocol {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
     UnknownTransportProtocol(u8),
     Malformed,
+    Fragmented,
 }
 
 impl Display for ParseError {
@@ -62,20 +63,23 @@ impl Display for ParseError {
                 write!(f, "Unknown transport protocol: {proto}")
             }
             ParseError::Malformed => write!(f, "Malformed packet"),
+            ParseError::Fragmented => write!(f, "Fragmented packet"),
         }
     }
 }
 
 impl std::error::Error for ParseError {}
 
-const IPV6_EXTENSION_HEADERS: [u8; 11] = [
+const IPV6_EXTENSION_HEADERS: [u8; 9] = [
     0,  // Hop-by-Hop Options
     43, // Routing
     44, // Fragment
     50, // Encapsulating Security Payload
     51, // Authentication Header
     60, // Destination Options
-    135, 139, 140, 253, 254,
+    135, // Mobility
+    139, // Host Identity Protocol
+    140 // Shim6
 ];
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Hash)]
@@ -102,7 +106,7 @@ impl ConnectionId {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InternetPacket {
     data: Vec<u8>,
     ip_version: IpVersion,
@@ -131,6 +135,9 @@ impl TryFrom<Vec<u8>> for InternetPacket {
                 if data.len() < 20 {
                     return Err(ParseError::Malformed);
                 }
+                if (data[6] & 0x3F) != 0 || data[7] != 0 {
+                    return Err(ParseError::Fragmented);
+                }
                 let proto = data[9];
                 let offset = (data[0] & 0x0F) as usize * 4;
                 let total_length = ((data[2] as usize) << 8) + data[3] as usize;
@@ -147,8 +154,17 @@ impl TryFrom<Vec<u8>> for InternetPacket {
                     if data.len() < offset + 8 {
                         return Err(ParseError::Malformed);
                     }
-                    next_header = data[offset];
-                    offset += (1 + data[offset + 1]) as usize * 8 - 8;
+                    if next_header == 44 {
+                        return Err(ParseError::Fragmented);
+                    }
+                    if next_header == 51 {
+                        // Authentication header is calculated differently.
+                        next_header = data[offset];
+                        offset += (data[offset + 1] as usize + 2) * 4;
+                    } else {
+                        next_header = data[offset];
+                        offset += (1 + data[offset + 1] as usize) * 8 - 8;
+                    }
                 }
 
                 let payload_length = ((data[4] as usize) << 8) + data[5] as usize;
@@ -185,6 +201,24 @@ impl TryFrom<Vec<u8>> for InternetPacket {
             payload_offset,
             payload_end,
         })
+    }
+}
+
+#[cfg(feature = "smoltcp")]
+impl TryFrom<smoltcp::wire::Ipv4Packet<Vec<u8>>> for InternetPacket {
+    type Error = ParseError;
+
+    fn try_from(value: smoltcp::wire::Ipv4Packet<Vec<u8>>) -> Result<Self, Self::Error> {
+        InternetPacket::try_from(value.into_inner())
+    }
+}
+
+#[cfg(feature = "smoltcp")]
+impl TryFrom<smoltcp::wire::Ipv6Packet<Vec<u8>>> for InternetPacket {
+    type Error = ParseError;
+
+    fn try_from(value: smoltcp::wire::Ipv6Packet<Vec<u8>>) -> Result<Self, Self::Error> {
+        InternetPacket::try_from(value.into_inner())
     }
 }
 
@@ -447,17 +481,43 @@ mod tests {
 
     use super::*;
 
-    const TCP_SYN: &[u8] = "45000034d14b4000800680e0c0a8b2145db8d822d92100508ad94999000000008002faf01da30000020405b40103030801010402".as_bytes();
-    const DNS_REQ: &[u8] =
-        "60000000003c33403ffe050700000001020086fffe0580da3ffe0501481900000000000000000042\
+    const IPV4_TCP_SYN: &[u8] = b"45000034d14b4000800680e0c0a8b2145db8d822d92100508ad94999000000008002faf01da30000020405b40103030801010402";
+    const IPV6_DNS_REQ: &[u8] =
+        b"60000000003c33403ffe050700000001020086fffe0580da3ffe0501481900000000000000000042\
     11040000000009070000010bbc09dd98f9b0b12e647f4454\
-    095c00350024f0090006010000010000000000000669746f6a756e036f72670000ff0001".as_bytes();
+    095c00350024f0090006010000010000000000000669746f6a756e036f72670000ff0001";
 
-    const TCP_ACK_WITH_PADDING: &[u8] = "4500002869330000320676a85db8d822c0a8b2710050d5224e95b5f3e586c974501000807d6800000000".as_bytes();
+    const IPV4_TCP_ACK_WITH_PADDING: &[u8] = b"4500002869330000320676a85db8d822c0a8b2710050d5224e95b5f3e586c974501000807d6800000000";
+
+    const IPV4_FRAG_1: &[u8] = b"450005dcd0fe2000401109e6c118e3eeacd9284c";
+    const IPV4_FRAG_2: &[u8] = b"450000fad0fe00b940112e0fc118e3eeacd9284c";
+    const IPV6_FRAG_1: &[u8] = b"600787fd05b02c4020010470765b0000000000000a2500532a00145040130c03000000000000010a1100000128403c0b";
+    const IPV6_FRAG_2: &[u8] = b"600787fd00452c4020010470765b0000000000000a2500532a00145040130c03000000000000010a110005a828403c0b";
+
+
+    #[test]
+    fn parse_fragmented() {
+        assert_eq!(
+                InternetPacket::try_from(HEXLOWER.decode(IPV4_FRAG_1).unwrap()),
+                Err(ParseError::Fragmented)
+            );
+        assert_eq!(
+                InternetPacket::try_from(HEXLOWER.decode(IPV4_FRAG_2).unwrap()),
+                Err(ParseError::Fragmented)
+            );
+        assert_eq!(
+                InternetPacket::try_from(HEXLOWER.decode(IPV6_FRAG_1).unwrap()),
+                Err(ParseError::Fragmented)
+            );
+        assert_eq!(
+                InternetPacket::try_from(HEXLOWER.decode(IPV6_FRAG_2).unwrap()),
+                Err(ParseError::Fragmented)
+            );
+    }
 
     #[test]
     fn parse_udp_ipv6_packet() {
-        let mut packet = InternetPacket::try_from(HEXLOWER.decode(DNS_REQ).unwrap()).unwrap();
+        let mut packet = InternetPacket::try_from(HEXLOWER.decode(IPV6_DNS_REQ).unwrap()).unwrap();
         assert_eq!(packet.ip_version, IpVersion::V6);
         assert_eq!(
             packet.connection_id(),
@@ -488,7 +548,7 @@ mod tests {
 
     #[test]
     fn parse_udp_ipv6_packet_malformed() {
-        let data = HEXLOWER.decode(DNS_REQ).unwrap();
+        let data = HEXLOWER.decode(IPV6_DNS_REQ).unwrap();
         for i in 0..72 {
             assert!(matches!(
                 InternetPacket::try_from(data[..i].to_vec()),
@@ -500,7 +560,7 @@ mod tests {
 
     #[test]
     fn parse_tcp_ipv4_packet() {
-        let mut packet = InternetPacket::try_from(HEXLOWER.decode(TCP_SYN).unwrap()).unwrap();
+        let mut packet = InternetPacket::try_from(HEXLOWER.decode(IPV4_TCP_SYN).unwrap()).unwrap();
         assert_eq!(packet.ip_version, IpVersion::V4);
         assert_eq!(
             packet.connection_id(),
@@ -534,7 +594,7 @@ mod tests {
 
     #[test]
     fn parse_tcp_ipv4_packet_malformed() {
-        let data = HEXLOWER.decode(TCP_SYN).unwrap();
+        let data = HEXLOWER.decode(IPV4_TCP_SYN).unwrap();
         for i in 0..data.len() {
             assert!(matches!(
                 InternetPacket::try_from(data[..i].to_vec()),
@@ -545,7 +605,7 @@ mod tests {
 
     #[test]
     fn parse_tcp_ipv4_packet_with_padding() {
-        let packet = InternetPacket::try_from(HEXLOWER.decode(TCP_ACK_WITH_PADDING).unwrap()).unwrap();
+        let packet = InternetPacket::try_from(HEXLOWER.decode(IPV4_TCP_ACK_WITH_PADDING).unwrap()).unwrap();
         assert_eq!(packet.ip_version, IpVersion::V4);
         assert!(!packet.tcp_syn());
         assert!(packet.tcp_ack());
@@ -555,7 +615,7 @@ mod tests {
     #[cfg(feature = "checksums")]
     #[test]
     fn recalculate_ipv4_checksum() {
-        let raw = HEXLOWER.decode(TCP_SYN).unwrap();
+        let raw = HEXLOWER.decode(IPV4_TCP_SYN).unwrap();
         let mut raw2 = raw.clone();
         raw2[10..12].copy_from_slice(&[0xab, 0xcd]);
         let mut packet = InternetPacket::try_from(raw2).unwrap();
@@ -567,7 +627,7 @@ mod tests {
     #[cfg(feature = "checksums")]
     #[test]
     fn recalculate_tcp_checksum_ipv4() {
-        let raw = HEXLOWER.decode(TCP_SYN).unwrap();
+        let raw = HEXLOWER.decode(IPV4_TCP_SYN).unwrap();
         let mut raw2 = raw.clone();
         raw2[36..38].copy_from_slice(&[0xab, 0xcd]);
         let mut packet = InternetPacket::try_from(raw2).unwrap();
@@ -578,7 +638,7 @@ mod tests {
     #[cfg(feature = "checksums")]
     #[test]
     fn recalculate_udp_checksum_ipv6() {
-        let raw = HEXLOWER.decode(DNS_REQ).unwrap();
+        let raw = HEXLOWER.decode(IPV6_DNS_REQ).unwrap();
         let mut raw2 = raw.clone();
         raw2[70..72].copy_from_slice(&[0xab, 0xcd]);
         let mut packet = InternetPacket::try_from(raw2).unwrap();
@@ -596,5 +656,23 @@ mod tests {
         let b = a.reverse();
         assert_ne!(a, b);
         assert_eq!(a.canonical_form(), b.canonical_form());
+    }
+
+    #[cfg(feature = "smoltcp")]
+    #[test]
+    fn from_smoltcp_ipv4() {
+        let buf = Vec::from(HEXLOWER.decode(IPV4_TCP_SYN).unwrap());
+        let smol_packet = smoltcp::wire::Ipv4Packet::new_checked(buf).unwrap();
+        let packet = InternetPacket::try_from(smol_packet).unwrap();
+        assert_eq!(packet.hop_limit(), 128);
+    }
+
+    #[cfg(feature = "smoltcp")]
+    #[test]
+    fn from_smoltcp_ipv6() {
+        let buf = Vec::from(HEXLOWER.decode(IPV6_DNS_REQ).unwrap());
+        let smol_packet = smoltcp::wire::Ipv6Packet::new_checked(buf).unwrap();
+        let packet = InternetPacket::try_from(smol_packet).unwrap();
+        assert_eq!(packet.hop_limit(), 64);
     }
 }
