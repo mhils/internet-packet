@@ -1,8 +1,11 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-#[cfg(feature = "checksums")]
+
+#[cfg(feature = "internet-checksum")]
 use internet_checksum::Checksum;
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -205,6 +208,7 @@ impl TryFrom<Vec<u8>> for InternetPacket {
 }
 
 #[cfg(feature = "smoltcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "smoltcp")))]
 impl TryFrom<smoltcp::wire::Ipv4Packet<Vec<u8>>> for InternetPacket {
     type Error = ParseError;
 
@@ -214,6 +218,7 @@ impl TryFrom<smoltcp::wire::Ipv4Packet<Vec<u8>>> for InternetPacket {
 }
 
 #[cfg(feature = "smoltcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "smoltcp")))]
 impl TryFrom<smoltcp::wire::Ipv6Packet<Vec<u8>>> for InternetPacket {
     type Error = ParseError;
 
@@ -406,7 +411,8 @@ impl InternetPacket {
         &self.data[self.payload_offset..self.payload_end]
     }
 
-    #[cfg(feature = "checksums")]
+    #[cfg(feature = "internet-checksum")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "internet-checksum")))]
     pub fn recalculate_ip_checksum(&mut self) {
         if self.ip_version == IpVersion::V4 {
             self.data[10..12].copy_from_slice(&[0, 0]);
@@ -416,7 +422,7 @@ impl InternetPacket {
         }
     }
 
-    #[cfg(feature = "checksums")]
+    #[cfg(feature = "internet-checksum")]
     fn pseudo_header_checksum(&self) -> Checksum {
         let upper_layer_packet_length = self.data.len() - self.transport_proto_offset;
 
@@ -440,7 +446,8 @@ impl InternetPacket {
         checksum
     }
 
-    #[cfg(feature = "checksums")]
+    #[cfg(feature = "internet-checksum")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "internet-checksum")))]
     pub fn recalculate_tcp_checksum(&mut self) {
         if self.transport_proto != TransportProtocol::Tcp {
             return;
@@ -453,7 +460,8 @@ impl InternetPacket {
         self.data[checksum_offset..checksum_offset + 2].copy_from_slice(&checksum.checksum());
     }
 
-    #[cfg(feature = "checksums")]
+    #[cfg(feature = "internet-checksum")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "internet-checksum")))]
     pub fn recalculate_udp_checksum(&mut self) {
         if self.transport_proto != TransportProtocol::Udp {
             return;
@@ -612,7 +620,7 @@ mod tests {
         assert_eq!(packet.payload().len(), 0);
     }
 
-    #[cfg(feature = "checksums")]
+    #[cfg(feature = "internet-checksum")]
     #[test]
     fn recalculate_ipv4_checksum() {
         let raw = HEXLOWER.decode(IPV4_TCP_SYN).unwrap();
@@ -624,7 +632,7 @@ mod tests {
         assert_eq!(packet.data, raw);
     }
 
-    #[cfg(feature = "checksums")]
+    #[cfg(feature = "internet-checksum")]
     #[test]
     fn recalculate_tcp_checksum_ipv4() {
         let raw = HEXLOWER.decode(IPV4_TCP_SYN).unwrap();
@@ -635,7 +643,7 @@ mod tests {
         assert_eq!(packet.data, raw);
     }
 
-    #[cfg(feature = "checksums")]
+    #[cfg(feature = "internet-checksum")]
     #[test]
     fn recalculate_udp_checksum_ipv6() {
         let raw = HEXLOWER.decode(IPV6_DNS_REQ).unwrap();
