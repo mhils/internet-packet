@@ -364,10 +364,53 @@ impl InternetPacket {
         }
     }
 
-    fn tcp_flags(&self) -> u8 {
+    /// This method is a no-op if this is not a TCP packet.
+    pub fn set_tcp_sequence_number(&mut self, seq: u32) {
+        match self.transport_proto {
+            TransportProtocol::Tcp => {
+                self.data[self.transport_proto_offset + 4..self.transport_proto_offset + 8].copy_from_slice(&seq.to_be_bytes());
+            }
+            _ => (),
+        }
+    }
+
+    pub fn tcp_acknowledgement_number(&self) -> u32 {
+        match self.transport_proto {
+            TransportProtocol::Tcp => {
+                u32::from_be_bytes(
+                    self.data[self.transport_proto_offset + 8..self.transport_proto_offset + 12]
+                        .try_into()
+                        .unwrap(),
+                )
+            }
+            _ => 0,
+        }
+    }
+
+    /// This method is a no-op if this is not a TCP packet.
+    pub fn set_tcp_acknowledgement_number(&mut self, ack: u32) {
+        match self.transport_proto {
+            TransportProtocol::Tcp => {
+                self.data[self.transport_proto_offset + 8..self.transport_proto_offset + 12].copy_from_slice(&ack.to_be_bytes());
+            }
+            _ => (),
+        }
+    }
+
+    pub fn tcp_flags(&self) -> u8 {
         match self.transport_proto {
             TransportProtocol::Tcp => self.data[self.transport_proto_offset + 13],
             _ => 0,
+        }
+    }
+
+    /// This method is a no-op if this is not a TCP packet.
+    pub fn set_tcp_flags(&mut self, flags: u8) {
+        match self.transport_proto {
+            TransportProtocol::Tcp => {
+                self.data[self.transport_proto_offset + 13] = flags;
+            },
+            _ => (),
         }
     }
 
@@ -595,8 +638,16 @@ mod tests {
         packet.set_hop_limit(42);
         assert_eq!(packet.hop_limit(), 42);
         assert_eq!(packet.tcp_flag_str(), "SYN");
+        assert_eq!(packet.tcp_flags(), 0x02);
+        assert_eq!(packet.tcp_sequence_number(), 2329495961);
+        assert_eq!(packet.tcp_acknowledgement_number(), 0);
 
-        packet.data[33] = 0xff;
+        packet.set_tcp_sequence_number(1122);
+        packet.set_tcp_acknowledgement_number(3344);
+        assert_eq!(packet.tcp_sequence_number(), 1122);
+        assert_eq!(packet.tcp_acknowledgement_number(), 3344);
+
+        packet.set_tcp_flags(0xff);
         assert_eq!(packet.tcp_flag_str(), "FIN/SYN/RST/PSH/ACK/URG");
     }
 
