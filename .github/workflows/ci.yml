@@ -16,10 +16,10 @@ concurrency:
 
 jobs:
   test:
-    uses: mhils/workflows/.github/workflows/rust-test.yml@main
+    uses: mhils/workflows/.github/workflows/rust-test.yml@v14
 
   deploy:
-    uses: mhils/workflows/.github/workflows/rust-deploy.yml@main
+    uses: mhils/workflows/.github/workflows/rust-deploy.yml@v14
     needs: test
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
     secrets:
