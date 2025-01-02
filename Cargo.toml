@@ -1,7 +1,7 @@
 [package]
 name = "internet-packet"
 description = "A minimal IPv4/IPv6/TCP/UDP parser"
-version = "0.2.2"
+version = "0.2.3"
 license = "MIT"
 authors = [
     "Maximilian Hils <cargo@maximilianhils.com>",
