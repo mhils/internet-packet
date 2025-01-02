@@ -20,7 +20,7 @@ checksums = ["internet-checksum"]
 
 [dependencies]
 internet-checksum = { version = "0.2.1", optional = true }
-smoltcp = { version = ">= 0.10, < 0.12", optional = true }
+smoltcp = { version = ">= 0.10, < 0.13", optional = true }
 
 
 [dev-dependencies]
